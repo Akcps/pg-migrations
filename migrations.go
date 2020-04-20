@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"github.com/go-pg/pg/v9"
 	"github.com/go-pg/pg/v9/orm"
@@ -15,6 +16,15 @@ import (
 	"strings"
 	"time"
 )
+
+type config struct {
+	PostgresAddress        string
+	PostgresDatabase       string
+	PostgresUsername       string
+	PostgresPassword       string
+	MigrationDirectoryPath string
+	Command                string
+}
 
 /**
 File Name Convention for upgrading files: V1__initial_step_up.up.sql
@@ -47,7 +57,6 @@ func NewSchemaMigrationDao(db *pg.DB) *SchemaMigrationDao {
 	return &SchemaMigrationDao{db: db}
 }
 
-
 type FileDetails struct {
 	Version       int
 	Description   string
@@ -59,12 +68,28 @@ type FileDetails struct {
 
 var (
 	schemaMigrationDao *SchemaMigrationDao
+	conf               config
 )
 
+func init() {
+	flag.StringVar(&conf.PostgresAddress, "postgres_address", "localhost:5432", "Postgres connection format {string IP:port} or {URL:post}")
+	flag.StringVar(&conf.PostgresDatabase, "postgres_database", "saas", "Postgres database name")
+	flag.StringVar(&conf.PostgresUsername, "postgres_username", "saas", "Postgres database username")
+	flag.StringVar(&conf.PostgresPassword, "postgres_password", "saas", "Postgres database password")
+	flag.StringVar(&conf.MigrationDirectoryPath, "migration_directory_path", "/Users/akcps/go/src/pg-migrations/sql", "Migration directory path")
+	flag.StringVar(&conf.Command, "command", "version", "up: runs all available migrations \ndown: reverts last migration \nreset:reverts all migrations \nversion:prints current db version\n")
+}
 func main() {
 	var err error
+	flag.Parse()
 
-	db, err := connectToDB("localhost:5432", "saas", "saas", "saas")
+	fmt.Println("postgres_address:", conf.PostgresAddress)
+	fmt.Println("postgres_database:", conf.PostgresDatabase)
+	fmt.Println("postgres_username:", conf.PostgresUsername)
+	fmt.Println("postgres_password", conf.PostgresPassword)
+	fmt.Println("migration_directory_path:", conf.MigrationDirectoryPath)
+	fmt.Println("command", conf.Command)
+	db, err := connectToDB(conf.PostgresAddress, conf.PostgresDatabase, conf.PostgresUsername, conf.PostgresPassword)
 	db.AddQueryHook(dbLogger{})
 	if err != nil {
 		log.Panic("Unable to connect to postgres.")
@@ -74,17 +99,67 @@ func main() {
 	}
 	createSchemaForMigration(db)
 	schemaMigrationDao = NewSchemaMigrationDao(db)
-	//migrationRootDirectory := "sql"
-	//if err := syncLatestMigrations(migrationRootDirectory); err != nil {
-	//	log.Printf("Unable to sync the migration directory %v with the database. Error %v", migrationRootDirectory, err.Error())
-	//}
-	if err := revertMigration(1); err != nil {
+
+	switch conf.Command {
+	case "version":
+		getCurrentVersion()
+		break
+	case "up":
+		upgradeMigration()
+		break
+	case "down":
+		downgradeMigration()
+		break
+	case "reset":
+		revertAll()
+		break
+	default:
+		fmt.Println("Unrecognized command. Accepted commands - up/down/version/reset.")
+	}
+
+}
+
+func getCurrentVersion() {
+	latestMigration, err := schemaMigrationDao.GetCurrentVersion()
+	if err != nil {
+		log.Printf("Unable to fetch Current Version.Error: %v", err.Error())
+	} else {
+		log.Printf("Current Version %v", latestMigration.Version)
+	}
+}
+
+func upgradeMigration() {
+	if err := syncLatestMigrations(conf.MigrationDirectoryPath); err != nil {
+		log.Printf("Unable to sync the migration directory %v with the database. Error %v",
+			conf.MigrationDirectoryPath, err.Error())
+	}
+}
+
+func downgradeMigration() {
+	latestMigration, err := schemaMigrationDao.GetCurrentVersion()
+	if err != nil {
+		log.Printf("Unable to fetch Current Version.Error: %v", err.Error())
+		os.Exit(1)
+	}
+	if err := revertMigration(latestMigration.Version); err != nil {
 		log.Printf("Unable to revert migration. Error %v", err.Error())
 	}
 }
 
+func revertAll() {
+	unProcessedMigrations, err := schemaMigrationDao.FetchUnProcessedSchemaMigrations("DOWNGRADE", "id DESC")
+	if err != nil {
+		log.Printf("Unable to reset. Error %v", err.Error())
+	}
+	for _, migrationSchema := range unProcessedMigrations {
+		if err = ApplyMigration(&migrationSchema); err != nil {
+			log.Printf("Unable to rever %#v. Error %v", migrationSchema, err.Error())
+		}
+	}
+}
+
 func revertMigration(version int) error {
-	sm, err := schemaMigrationDao.FetchUnProcessedSchemaMigrationBasedOnVersionAndType(1, "DOWNGRADE")
+	sm, err := schemaMigrationDao.FetchUnProcessedSchemaMigrationBasedOnVersionAndType(version, "DOWNGRADE")
 	if err != nil {
 		return err
 	}
@@ -101,7 +176,7 @@ func syncLatestMigrations(migrationRootDirectory string) error {
 	if err != nil {
 		return err
 	}
-	unProcessedMigrations, err := schemaMigrationDao.FetchUnProcessedSchemaMigrations("UPGRADE")
+	unProcessedMigrations, err := schemaMigrationDao.FetchUnProcessedSchemaMigrations("UPGRADE", "id ASC")
 	if err != nil {
 		return err
 	}
@@ -142,7 +217,7 @@ func AddNewSchemaMigrations(migrationRootDirectory string, schemaMigrationDao *S
 		return err
 	})
 	if err != nil {
-		log.Panic(err)
+		log.Println(err)
 		return err
 	}
 	for _, filePath := range files {
@@ -207,7 +282,6 @@ func connectToDB(url, databaseName, username, password string) (*pg.DB, error) {
 	return db, nil
 }
 
-
 func createSchemaForMigration(db *pg.DB) {
 	for _, model := range []interface{}{&SchemaMigration{}} {
 		if err := db.CreateTable(model, &orm.CreateTableOptions{
@@ -246,10 +320,10 @@ func (d *SchemaMigrationDao) AddSchemaMigration(sm *SchemaMigration) (*SchemaMig
 	return sm, nil
 }
 
-func (d *SchemaMigrationDao) FetchUnProcessedSchemaMigrations(migrationType string) ([]SchemaMigration, error) {
-	log.Printf("FetchUnProcessedSchemaMigrations request with migrationType %#v", migrationType)
+func (d *SchemaMigrationDao) FetchUnProcessedSchemaMigrations(migrationType, order string) ([]SchemaMigration, error) {
+	log.Printf("FetchUnProcessedSchemaMigrations request with migrationType %#v, order %#v", migrationType, order)
 	var schemaMigrations []SchemaMigration
-	err := d.db.Model(&schemaMigrations).Where("processed = ? and migration_type = ?", false, migrationType).Select()
+	err := d.db.Model(&schemaMigrations).Where("processed = ? and migration_type = ?", false, migrationType).Order(order).Select()
 	if err != nil {
 		return nil, err
 	}
@@ -346,7 +420,6 @@ func GetFileDetails(filePath string) (*FileDetails, error) {
 	}, nil
 }
 
-
 func (d *SchemaMigrationDao) FetchUnProcessedSchemaMigrationBasedOnVersionAndType(ID int, migrationType string) (*SchemaMigration, error) {
 	log.Printf("FetchUnProcessedSchemaMigrationBasedOnVersionAndType request with ID %v migrationType %#v", ID, migrationType)
 	schemaMigration := new(SchemaMigration)
@@ -355,6 +428,17 @@ func (d *SchemaMigrationDao) FetchUnProcessedSchemaMigrationBasedOnVersionAndTyp
 		return nil, err
 	}
 	log.Printf("FetchUnProcessedSchemaMigrations response for ID %v, migrationType %v  %#v", ID, migrationType, schemaMigration)
+	return schemaMigration, nil
+}
+
+func (d *SchemaMigrationDao) GetCurrentVersion() (*SchemaMigration, error) {
+	log.Println("GetCurrentVersion request")
+	schemaMigration := new(SchemaMigration)
+	err := d.db.Model(schemaMigration).Where("processed = ? and migration_type = ?", true, "UPGRADE").Last()
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("GetCurrentVersion response with  %#v", schemaMigration)
 	return schemaMigration, nil
 }
 
@@ -368,4 +452,3 @@ func (d dbLogger) AfterQuery(c context.Context, q *pg.QueryEvent) error {
 	log.Println(q.FormattedQuery())
 	return nil
 }
-
