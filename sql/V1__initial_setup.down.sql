@@ -1,0 +1,4 @@
+BEGIN;
+DROP TABLE orgs;
+DROP TABLE roles;
+COMMIT;
