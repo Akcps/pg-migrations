@@ -88,7 +88,7 @@ func main() {
 	fmt.Println("postgres_username:", conf.PostgresUsername)
 	fmt.Println("postgres_password", conf.PostgresPassword)
 	fmt.Println("migration_directory_path:", conf.MigrationDirectoryPath)
-	fmt.Println("command", conf.Command)
+	fmt.Println("command:", conf.Command)
 	db, err := connectToDB(conf.PostgresAddress, conf.PostgresDatabase, conf.PostgresUsername, conf.PostgresPassword)
 	db.AddQueryHook(dbLogger{})
 	if err != nil {
@@ -114,9 +114,8 @@ func main() {
 		revertAll()
 		break
 	default:
-		fmt.Println("Unrecognized command. Accepted commands - up/down/version/reset.")
+		fmt.Println("Unrecognized command. Accepted commands - up/down/version/reset")
 	}
-
 }
 
 func getCurrentVersion() {
